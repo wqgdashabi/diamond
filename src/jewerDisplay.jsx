@@ -8,6 +8,7 @@ import {
   RenderTargetPreviewPlugin,
   SSAAPlugin,
   ThreeViewer,
+  ShaderMaterial,
 } from "threepipe";
 import { TweakpaneUiPlugin } from "@threepipe/plugin-tweakpane";
 import {
@@ -15,6 +16,7 @@ import {
   SSReflectionPlugin,
   TemporalAAPlugin,
 } from "@threepipe/webgi-plugins";
+import { CustomGemBloomShader } from "./shader/bloomShader";
 
 const DEFAULT_MODEL = "../public/gltfModule/jewelry_ring.glb";
 
@@ -67,7 +69,10 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
         // ✅ 关键修复1：先设置背景色
         viewer.scene.backgroundColor = new Color(0x1b1b1f);
 
-        // ✅ 关键修复2：先设置地面材质
+        const material = new ShaderMaterial({
+          CustomGemBloomShader,
+        });
+        material.needsUpdate = true;
         ground.tonemapGround = false;
         if (ground.material) {
           ground.material.color.set(0x1b1b1f);
@@ -78,19 +83,42 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
 
         // 加载模型
         console.log("Loading model:", modelUrl);
-        // 1. 先准备环境贴图 Promise
+        // 或使用 Three.js 官方示例的 HDR
         const envPromise = viewer.setEnvironmentMap(
-          "https://samples.threepipe.org/minimal/venice_sunset_1k.hdr",
+          "https://threejs.org/examples/textures/equirectangular/venice_sunset_1k.hdr",
         );
 
-        // 2. 再加载模型
-        const modelPromise = viewer.load(modelUrl, {
+        const loadResult = await viewer.load(modelUrl, {
           autoCenter: true,
           autoScale: false,
         });
 
+        console.log("Load result:", loadResult);
+
+        if (loadResult && loadResult.traverse) {
+          loadResult.traverse((obj) => {
+            if (obj.material && obj.material.isMaterial) {
+              const envMap = viewer.scene.environment;
+              if (envMap) {
+                obj.material.envMap = envMap;
+                obj.material.envMapIntensity = 1.0;
+                obj.material.needsUpdate = true;
+
+                if (
+                  obj.material.name.includes("anisotropic") ||
+                  obj.material.metalness === 1
+                ) {
+                  obj.material.roughness = 0.1; // 降低粗糙度，增加光泽
+                  obj.material.clearcoat = 0.5; // 添加清漆层
+                  obj.material.clearcoatRoughness = 0.1;
+                }
+              }
+            }
+          });
+        }
+
         // 3. 等待两者都完成
-        await Promise.all([envPromise, modelPromise]);
+        await Promise.all([envPromise, loadResult]);
 
         // UI面板
         ui.setupPluginUi(ssrefl, { expanded: true });
