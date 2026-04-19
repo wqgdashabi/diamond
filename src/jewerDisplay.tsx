@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+// src/JewerDisplay.tsx
+
+import React, { useEffect, useRef, useState } from "react";
 import {
   BaseGroundPlugin,
   Color,
@@ -9,6 +11,7 @@ import {
   SSAAPlugin,
   ThreeViewer,
   ShaderMaterial,
+  IViewerPlugin,
 } from "threepipe";
 import { TweakpaneUiPlugin } from "@threepipe/plugin-tweakpane";
 import {
@@ -17,14 +20,67 @@ import {
   TemporalAAPlugin,
 } from "@threepipe/webgi-plugins";
 import { CustomGemBloomShader } from "./shader/bloomShader";
+import type { Object3D, Material, Camera } from "three";
 
-const DEFAULT_MODEL = "../public/gltfModule/jewelry_ring.glb";
+// 扩展 ThreeViewer 类型以支持 Threepipe 插件
+interface ExtendedThreeViewer {
+  renderManager: {
+    stableNoise: boolean;
+  };
+  addPluginSync: <T extends IViewerPlugin>(
+    plugin: T | (new (...args: any[]) => T),
+    ...args: any[]
+  ) => T;
+  setEnvironmentMap: (url: string) => Promise<void>;
+  load: (url: string, options?: any) => Promise<Object3D>;
+  dispose: () => void;
+  scene: {
+    backgroundColor: Color | null;
+    environment: any;
+    mainCamera: Camera & {
+      controls?: {
+        autoRotate: boolean;
+        autoRotateSpeed: number;
+        enableDamping: boolean;
+        dampingFactor: number;
+      };
+    };
+  };
+}
 
-export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
-  const canvasRef = useRef(null);
-  const viewerRef = useRef(null);
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState(null);
+// 扩展插件类型
+interface ExtendedSSReflectionPlugin extends IViewerPlugin {
+  inlineShaderRayTrace?: boolean;
+  target?: any;
+}
+
+interface ExtendedBaseGroundPlugin extends IViewerPlugin {
+  tonemapGround: boolean;
+  material?: Material & {
+    color: { set: (hex: number) => void };
+    roughness: number;
+    userData: Record<string, any>;
+    envMapIntensity: number;
+  };
+}
+
+interface ExtendedTweakpaneUiPlugin extends IViewerPlugin {
+  setupPluginUi: (plugin: any, options?: any) => void;
+}
+
+interface JewerDisplayProps {
+  modelUrl?: string;
+}
+
+const DEFAULT_MODEL = "../public/gltfModule/jewelry_ring.glb"; // 修正路径
+
+export const JewerDisplay: React.FC<JewerDisplayProps> = ({
+  modelUrl = DEFAULT_MODEL,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewerRef = useRef<ExtendedThreeViewer | null>(null);
+  const [ready, setReady] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -32,14 +88,15 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
 
     let cancelled = false;
 
-    async function boot() {
+    async function boot(): Promise<void> {
       setReady(false);
       setError(null);
 
       try {
+        // 方案1：使用 unknown 中转（推荐）
         const viewer = new ThreeViewer({
-          canvas,
-          msaa: true, // 改为 true，参考源码
+          canvas: canvas || undefined, // 将 null 转换为 undefined
+          msaa: true,
           rgbm: true,
           dropzone: {
             addOptions: { disposeSceneObjects: true },
@@ -51,7 +108,8 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
             SSAAPlugin,
             TemporalAAPlugin,
           ],
-        });
+        }) as unknown as ExtendedThreeViewer;
+
         viewer.renderManager.stableNoise = true;
 
         if (cancelled) {
@@ -60,19 +118,26 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
         }
         viewerRef.current = viewer;
 
-        const ssrefl = viewer.addPluginSync(new SSReflectionPlugin(true));
-        const ground = viewer.addPluginSync(BaseGroundPlugin);
+        const ssrefl = viewer.addPluginSync(
+          new SSReflectionPlugin(true),
+        ) as ExtendedSSReflectionPlugin;
+
+        const ground = viewer.addPluginSync(
+          BaseGroundPlugin,
+        ) as ExtendedBaseGroundPlugin;
         viewer.addPluginSync(PickingPlugin);
 
-        const ui = viewer.addPluginSync(new TweakpaneUiPlugin(true));
+        const ui = viewer.addPluginSync(
+          new TweakpaneUiPlugin(true),
+        ) as ExtendedTweakpaneUiPlugin;
 
-        // ✅ 关键修复1：先设置背景色
+        // ✅ 设置背景色
         viewer.scene.backgroundColor = new Color(0x1b1b1f);
 
-        const material = new ShaderMaterial({
-          CustomGemBloomShader,
-        });
+        // 材质配置
+        const material = new ShaderMaterial(CustomGemBloomShader);
         material.needsUpdate = true;
+
         ground.tonemapGround = false;
         if (ground.material) {
           ground.material.color.set(0x1b1b1f);
@@ -83,7 +148,7 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
 
         // 加载模型
         console.log("Loading model:", modelUrl);
-        // 或使用 Three.js 官方示例的 HDR
+
         const envPromise = viewer.setEnvironmentMap(
           "https://threejs.org/examples/textures/equirectangular/venice_sunset_1k.hdr",
         );
@@ -95,30 +160,48 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
 
         console.log("Load result:", loadResult);
 
-        if (loadResult && loadResult.traverse) {
-          loadResult.traverse((obj) => {
-            if (obj.material && obj.material.isMaterial) {
-              const envMap = viewer.scene.environment;
-              if (envMap) {
-                obj.material.envMap = envMap;
-                obj.material.envMapIntensity = 1.0;
-                obj.material.needsUpdate = true;
+        // ✅ 等待环境贴图加载完成
+        await envPromise;
 
-                if (
-                  obj.material.name.includes("anisotropic") ||
-                  obj.material.metalness === 1
-                ) {
-                  obj.material.roughness = 0.1; // 降低粗糙度，增加光泽
-                  obj.material.clearcoat = 0.5; // 添加清漆层
-                  obj.material.clearcoatRoughness = 0.1;
+        // 处理材质
+        if (loadResult && typeof loadResult.traverse === "function") {
+          loadResult.traverse(
+            (
+              obj: Object3D & {
+                material?: Material & { isMaterial?: boolean };
+              },
+            ) => {
+              if (obj.material && obj.material.isMaterial) {
+                const envMap = viewer.scene.environment;
+                if (envMap) {
+                  const mat = obj.material as Material & {
+                    envMap?: any;
+                    envMapIntensity?: number;
+                    name?: string;
+                    metalness?: number;
+                    roughness?: number;
+                    clearcoat?: number;
+                    clearcoatRoughness?: number;
+                    needsUpdate?: boolean;
+                  };
+
+                  mat.envMap = envMap;
+                  mat.envMapIntensity = 1.0;
+                  mat.needsUpdate = true;
+
+                  if (
+                    mat.name?.includes("anisotropic") ||
+                    mat.metalness === 1
+                  ) {
+                    mat.roughness = 0.1;
+                    mat.clearcoat = 0.5;
+                    mat.clearcoatRoughness = 0.1;
+                  }
                 }
               }
-            }
-          });
+            },
+          );
         }
-
-        // 3. 等待两者都完成
-        await Promise.all([envPromise, loadResult]);
 
         // UI面板
         ui.setupPluginUi(ssrefl, { expanded: true });
@@ -144,7 +227,7 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
         console.log("Scene initialized successfully");
       } catch (err) {
         console.error("Initialization failed:", err);
-        setError(err.message || "加载失败");
+        setError(err instanceof Error ? err.message : "加载失败");
       }
     }
 
@@ -165,7 +248,7 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
         display: "flex",
         height: "100vh",
         position: "relative",
-        background: "#1B1B1F", // 添加背景色
+        background: "#1B1B1F",
       }}
     >
       <canvas
@@ -210,4 +293,4 @@ export function JewerDisplay({ modelUrl = DEFAULT_MODEL } = {}) {
       )}
     </div>
   );
-}
+};
