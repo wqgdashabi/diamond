@@ -1,13 +1,17 @@
+// vite.config.js
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    // 关键：强制排除 threepipe 和 three
+    exclude: ["three", "threepipe", "@threepipe/webgi-plugins"],
+  },
+  // 添加 resolve 配置帮助找到 three
   resolve: {
-    // 强制所有 three 导入都指向 threepipe 内置版本
     alias: {
-      three: "threepipe/three",
+      three: "/node_modules/three/build/three.module.js",
     },
   },
 });
